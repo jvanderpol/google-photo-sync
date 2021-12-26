@@ -3,7 +3,7 @@
 import argparse
 import datetime
 import time
-from typing import Optional, Iterator, Dict
+from typing import Optional, Iterator, Dict, Set
 import os
 import json
 import dataclasses
@@ -12,9 +12,12 @@ import string
 import random
 from urllib.request import Request, urlopen, urlretrieve
 from urllib.parse import urlparse, parse_qs, urlencode
-from queue import Queue
+import queue
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
+import logging
+
+logger = logging.getLogger()
 
 TOKEN_FILE = '.token.json'
 LOCATIONS_FILE = '.file_locations.json'
@@ -42,6 +45,11 @@ class ClientConfig:
   client_secret: str
 
 @dataclasses.dataclass
+class FileLocation:
+  relative_path: str
+  absolute_path: str
+
+@dataclasses.dataclass
 class MediaItem:
   video: bool
   media_id: str
@@ -50,6 +58,11 @@ class MediaItem:
 
   def download_url(self) -> str:
     return self.base_url + ('=dv' if self.video else '=d')
+
+@dataclasses.dataclass
+class Download:
+  image: MediaItem
+  location: FileLocation
 
 class AuthCallbackHandler(BaseHTTPRequestHandler):
 
@@ -78,14 +91,14 @@ class AuthCallbackHandler(BaseHTTPRequestHandler):
     pass
 
 def get_auth_token(client_config: ClientConfig) -> TokenData:
-  key_queue = Queue()
+  key_queue = queue.Queue()
   server = HTTPServer(
       ('', 0), lambda *args: AuthCallbackHandler(key_queue, *args))
   server_thread = threading.Thread(target=server.serve_forever)
   server_thread.daemon = True
   server_thread.start()
   server_url = 'http://localhost:{}'.format(server.server_port)
-  print('Listening at {}'.format(server_url))
+  logging.debug('Listening at {}', server_url)
   redirect_uri = server_url + AUTH_CALLBACK_PATH
 
   code_verifier = ''.join(
@@ -102,7 +115,7 @@ def get_auth_token(client_config: ClientConfig) -> TokenData:
   print('Waiting for auth, go to {}'.format(auth_url))
   key = key_queue.get()
 
-  print('Shutting down server')
+  logging.debug('Shutting down server')
   server.shutdown()
   return make_auth_token_request(
     client_config,
@@ -165,13 +178,18 @@ def read_token(token_file: str) -> Optional[TokenData]:
   return decode_json_token(token_dict)
 
 def list_images(
-    token: TokenData, client_config: ClientConfig, token_file: str
+    token: TokenData,
+    client_config: ClientConfig,
+    token_file: str,
+    max_images: int
 ) -> Iterator[MediaItem]:
-  pages = 0
   params = {'pageSize': '100'}
+  images_returned = 0
+  print('Requesting image list ', end='')
   while True:
     token = maybe_refresh_token(token, client_config, token_file)
     response = api_request('/v1/mediaItems?{}'.format(urlencode(params)), token)
+    print('.', end='', flush=True)
     for media_item in response['mediaItems']:
       video = media_item['mediaMetadata'].get('video')
       if not video or video['status'] == 'READY':
@@ -180,17 +198,19 @@ def list_images(
             media_id=media_item['id'],
             filename=media_item['filename'],
             base_url=media_item['baseUrl'])
+        images_returned = images_returned + 1
+        if max_images and images_returned == max_images:
+          print()
+          return
     next_page_token = response.get('nextPageToken')
-    pages = pages + 1
-    if pages > 10:
-      return
     if not next_page_token:
+      print()
       return
     params['pageToken'] = next_page_token
 
 def api_request(path: str, token: TokenData):
   url = BASE_PHOTOS_API_URL + path
-  print('Making request to {}'.format(url))
+  logging.debug('Making request to {}'.format(url))
   request = Request(
       url,
       headers={'Authorization': 'Bearer {}'.format(token.access_token)})
@@ -201,7 +221,7 @@ def maybe_refresh_token(
 ) -> TokenData:
   remaining_time = token.expire_time - time.time() 
   if remaining_time < 0:
-    print('Refreshing token')
+    logging.debug('Refreshing token')
     token = refresh_auth_token(token, client_config)
     write_token(token, token_file)
   return token
@@ -223,37 +243,14 @@ def read_image_locations(locations_file: str) -> Dict[str, str]:
 def write_image_locations(
     image_locations: Dict[str, str], locations_file: str) -> None:
   with open(locations_file, 'w') as f:
-    f.write(json.dumps(image_locations))
-
-parser = argparse.ArgumentParser(
-    description='Syncs all google photos to a local directory.')
-parser.add_argument('--output_dir', '-o', type=str, required=True)
-parser.add_argument('--max_downloads', type=int, default=500)
-args = parser.parse_args()
-
-client_config = read_client_config()
-token_file = os.path.join(args.output_dir, TOKEN_FILE)
-token = read_token(token_file)
-if not token:
-  print('Getting a new token')
-  token = get_auth_token(client_config)
-  write_token(token, token_file)
-
-locations_file = os.path.join(args.output_dir, LOCATIONS_FILE)
-image_locations = read_image_locations(locations_file)
-
-images_to_download = [
-    i for i in list_images(token, client_config, token_file)
-    if i.media_id not in image_locations]
-if args.max_downloads != -1 and args.max_downloads < len(images_to_download):
-  raise Exception(
-      'Number of images to download ({}) exceeds the max_downloads ({}). '
-      'Increase the limit or use --max_downloads=-1'.format(
-        len(images_to_download), args.max_downloads))
+    f.write(json.dumps(image_locations, indent=2))
 
 def find_unused_file(
-    preferred_name: str, output_dir: str, image_locations: Dict[str, str]
-    ) -> (str, str):
+    preferred_name: str,
+    output_dir: str,
+    image_locations: Dict[str, str],
+    pending_locations: Set[str]
+) -> FileLocation:
   suffix = 0
   while True:
     relative = None
@@ -264,14 +261,92 @@ def find_unused_file(
       relative = preferred_name
     absolute = os.path.join(output_dir, relative)
     if (not os.path.isfile(absolute) and
-        relative not in image_locations.values()):
-      return relative, absolute
+        relative not in image_locations.values() and
+        relative not in pending_locations):
+      return FileLocation(relative_path=relative, absolute_path=absolute)
     suffix = suffix + 1
 
+class DownloadThread(threading.Thread):
+
+  def __init__(self, pending_download_queue, completed_download_queue):
+    super().__init__()
+    self.pending_download_queue = pending_download_queue
+    self.completed_download_queue = completed_download_queue
+
+  def run(self):
+    try:
+      while True:
+        download = self.pending_download_queue.get(False)
+        logging.debug(
+            'Download %s to %s',
+            download.image.download_url(),
+            download.location.absolute_path)
+        urlretrieve(
+            download.image.download_url(), download.location.absolute_path)
+        self.completed_download_queue.put(download)
+    except queue.Empty:
+      #This is expected when downloading is done
+      pass
+
+
+parser = argparse.ArgumentParser(
+    description='Syncs all google photos to a local directory.')
+parser.add_argument('--output_dir', '-o', type=str, required=True)
+parser.add_argument('--max_downloads', type=int, default=500)
+parser.add_argument('--max_images_to_sync', type=int, default=None)
+parser.add_argument('--download_threads', type=int, default=10)
+args = parser.parse_args()
+
+client_config = read_client_config()
+token_file = os.path.join(args.output_dir, TOKEN_FILE)
+token = read_token(token_file)
+if not token:
+  logging.debug('Getting a new token')
+  token = get_auth_token(client_config)
+  write_token(token, token_file)
+
+locations_file = os.path.join(args.output_dir, LOCATIONS_FILE)
+image_locations = read_image_locations(locations_file)
+
+images_to_download = [
+    i for i in list_images(token, client_config, token_file, args.max_images_to_sync)
+    if i.media_id not in image_locations]
+if args.max_downloads != -1 and args.max_downloads < len(images_to_download):
+  raise Exception(
+      'Number of images to download ({}) exceeds the max_downloads ({}). '
+      'Increase the limit or use --max_downloads=-1'.format(
+        len(images_to_download), args.max_downloads))
+
+image_count_to_download = len(images_to_download)
+print('Downloading {} images'.format(image_count_to_download))
+pending_locations = set()
+pending_download_queue = queue.Queue()
+completed_download_queue = queue.Queue()
 for image in images_to_download:
-  relative, absolute = find_unused_file(
-      image.filename, args.output_dir, image_locations)
-  print('Download {} to {}'.format(image.download_url(), absolute))
-  urlretrieve(image.download_url(), absolute)
-  image_locations[image.media_id] = relative
-  write_image_locations(image_locations, locations_file)
+  location = find_unused_file(
+      image.filename, args.output_dir, image_locations, pending_locations)
+  pending_locations.add(location.relative_path)
+  pending_download_queue.put(Download(image=image, location=location))
+
+pending_download_count = image_count_to_download
+for _ in range(args.download_threads):
+  DownloadThread(pending_download_queue, completed_download_queue).start()
+
+while pending_download_count > 0:
+  completed_downloads_count = image_count_to_download - pending_download_count
+  if completed_downloads_count % 100 == 0:
+    if completed_downloads_count > 0:
+      print()
+    print('[{}/{}] '.format(
+        completed_downloads_count, image_count_to_download), end='')
+  download = completed_download_queue.get()
+  image_locations[download.image.media_id] = download.location.relative_path
+  print('.', end='', flush=True)
+  if pending_download_count % 20 == 0:
+    write_image_locations(image_locations, locations_file)
+  pending_download_count = pending_download_count - 1
+
+if image_count_to_download > 0:
+  print()
+print('Done')
+write_image_locations(image_locations, locations_file)
