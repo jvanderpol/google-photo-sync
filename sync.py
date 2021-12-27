@@ -8,6 +8,7 @@ import datetime
 import http.server
 import json
 import logging
+import math
 import os
 import queue
 import random
@@ -75,6 +76,11 @@ class Download:
   image: MediaItem
   location: FileLocation
 
+@dataclasses.dataclass
+class DownloadResult:
+  download: Download
+  success: bool
+
 class DownloadThread(threading.Thread):
 
   def __init__(self, pending_download_queue, completed_download_queue):
@@ -90,9 +96,15 @@ class DownloadThread(threading.Thread):
             'Download %s to %s',
             download.image.download_url(),
             download.location.absolute_path)
-        urllib.request.urlretrieve(
-            download.image.download_url(), download.location.absolute_path)
-        self.completed_download_queue.put(download)
+        try:
+          urllib.request.urlretrieve(
+              download.image.download_url(), download.location.absolute_path)
+          self.completed_download_queue.put(DownloadResult(download=download, success=True))
+        except:
+          logging.error('Error downloading %s', download.image.download_url(), exc_info=True)
+          if os.path.isfile(download.location.absolute_path):
+            os.remove(download.location.absolute_path)
+          self.completed_download_queue.put(DownloadResult(download=download, success=False))
     except queue.Empty:
       #This is expected when downloading is done
       pass
@@ -340,10 +352,10 @@ class ImageSync(object):
           print()
         print('[{}/{}] '.format(
             completed_downloads_count, image_count_to_download), end='')
-      download = completed_download_queue.get()
-      self.image_locations[download.image.media_id] = (
-          download.location.relative_path)
-      print('.', end='', flush=True)
+      result = completed_download_queue.get()
+      self.image_locations[result.download.image.media_id] = (
+          result.download.location.relative_path)
+      print('.' if result.success else 'E', end='', flush=True)
       if pending_download_count % 20 == 0:
         self.write_image_locations()
       pending_download_count = pending_download_count - 1
@@ -354,10 +366,12 @@ class ImageSync(object):
 
   def get_media_items(self, media_ids: List[str]) -> Dict[str, str]:
     media_items = {}
+    print('Getting image lists ({}) '.format(math.ceil(len(media_ids) / MAX_IDS_PER_BATCH_GET)), end='')
     for i in range(0, len(media_ids), MAX_IDS_PER_BATCH_GET):
       batch_ids = media_ids[i:i + MAX_IDS_PER_BATCH_GET]
       params = urllib.parse.urlencode([('mediaItemIds', media_id) for media_id in batch_ids])
       response = self.api_request('/v1/mediaItems:batchGet?{}'.format(params))
+      print('.', end='', flush=True)
       for media_item_result in response['mediaItemResults']:
         error = media_item_result.get('status')
         if error:
@@ -369,20 +383,19 @@ class ImageSync(object):
     return media_items
 
   def reconcile(self) -> None:
-    local_files = [
-        f for f in os.listdir(self.output_dir)
-        if not f.startswith('.') and os.path.isfile(
-          os.path.join(self.output_dir, f))]
+    _, _, all_files = next(os.walk(self.output_dir), (None, None, []))
+    non_hidden_files = set([f for f in all_files if not f.startswith('.')])
+    expected_files = set(self.image_locations.values())
     files_to_delete = [
-        f for f in local_files
-        if f not in self.image_locations.values()]
+        f for f in non_hidden_files
+        if f not in expected_files]
     if files_to_delete:
       print('About to delete:\n  {}'.format('\n  '.join(files_to_delete)))
       if confirm("Delete {} files?".format(len(files_to_delete))):
         for file in files_to_delete:
           os.remove(os.path.join(self.output_dir, file))
     entries_to_download = [
-        (k, v) for k, v in self.image_locations.items() if v not in local_files]
+        (k, v) for k, v in self.image_locations.items() if v not in non_hidden_files]
     if entries_to_download:
       relative_paths = [v for k, v in entries_to_download]
       print('About to download:\n  {}'.format('\n  '.join(relative_paths)))
