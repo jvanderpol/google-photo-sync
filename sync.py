@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 
+from typing import Dict, Iterator, List, Optional, Set
+
 import argparse
-import datetime
-import time
-from typing import Optional, Iterator, Dict, Set, List
-import os
-import json
 import dataclasses
-import threading
-import string
-import random
-from urllib.request import Request, urlopen, urlretrieve
-from urllib.parse import urlparse, parse_qs, urlencode
-import queue
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
+import datetime
+import http.server
+import json
 import logging
+import os
+import queue
+import random
+import socketserver
+import string
+import threading
+import time
+import urllib.parse
+import urllib.request
 
 logger = logging.getLogger()
 
@@ -89,7 +90,7 @@ class DownloadThread(threading.Thread):
             'Download %s to %s',
             download.image.download_url(),
             download.location.absolute_path)
-        urlretrieve(
+        urllib.request.urlretrieve(
             download.image.download_url(), download.location.absolute_path)
         self.completed_download_queue.put(download)
     except queue.Empty:
@@ -97,7 +98,7 @@ class DownloadThread(threading.Thread):
       pass
 
 
-class AuthCallbackHandler(BaseHTTPRequestHandler):
+class AuthCallbackHandler(http.server.BaseHTTPRequestHandler):
 
   def __init__(self, key_queue, *args):
     self.key_queue = key_queue
@@ -106,9 +107,9 @@ class AuthCallbackHandler(BaseHTTPRequestHandler):
   def do_GET(self):
     self.send_response(200)
     self.end_headers()
-    parsed_url = urlparse(self.path)
+    parsed_url = urllib.parse.urlparse(self.path)
     if parsed_url.path == AUTH_CALLBACK_PATH:
-      query_params = parse_qs(parsed_url.query)
+      query_params = urllib.parse.parse_qs(parsed_url.query)
       message = None
       if 'code' in query_params and query_params['code']:
         self.key_queue.put(query_params['code'][0])
@@ -161,7 +162,7 @@ def confirm(question: str) -> bool:
 
 def get_auth_token(client_config: ClientConfig) -> TokenData:
   key_queue = queue.Queue()
-  server = HTTPServer(
+  server = http.server.HTTPServer(
       ('', 0), lambda *args: AuthCallbackHandler(key_queue, *args))
   server_thread = threading.Thread(target=server.serve_forever)
   server_thread.daemon = True
@@ -180,7 +181,7 @@ def get_auth_token(client_config: ClientConfig) -> TokenData:
       'code_challenge': code_verifier,
       'code_challenge_method': 'plain'
   }
-  auth_url = '{}?{}'.format(BASE_AUTH_URL, urlencode(auth_params))
+  auth_url = '{}?{}'.format(BASE_AUTH_URL, urllib.parse.urlencode(auth_params))
   print('Waiting for auth, go to {}'.format(auth_url))
   key = key_queue.get()
 
@@ -199,12 +200,12 @@ def make_auth_token_request(client_config: ClientConfig, **kwargs) -> TokenData:
     'client_secret': client_config.client_secret,
     **kwargs
   }
-  request = Request(
+  request = urllib.request.Request(
       TOKEN_URL,
-      data=urlencode(params).encode(),
+      data=urllib.parse.urlencode(params).encode(),
       headers=TOKEN_HEADERS,
       method='POST')
-  token_json = urlopen(request).read().decode()
+  token_json = urllib.request.urlopen(request).read().decode()
   return decode_json_token(json.loads(token_json))
 
 def read_token(token_file: str) -> Optional[TokenData]:
@@ -243,7 +244,7 @@ class ImageSync(object):
     print('Requesting image list ', end='')
     while True:
       self.maybe_refresh_token()
-      response = self.api_request('/v1/mediaItems?{}'.format(urlencode(params)))
+      response = self.api_request('/v1/mediaItems?{}'.format(urllib.parse.urlencode(params)))
       print('.', end='', flush=True)
       for media_item_data in response['mediaItems']:
         media_item = parse_media_item(media_item_data)
@@ -262,10 +263,10 @@ class ImageSync(object):
   def api_request(self, path: str):
     url = BASE_PHOTOS_API_URL + path
     logging.debug('Making request to {}'.format(url))
-    request = Request(
+    request = urllib.request.Request(
         url,
         headers={'Authorization': 'Bearer {}'.format(self.token.access_token)})
-    return json.loads(urlopen(request).read().decode())
+    return json.loads(urllib.request.urlopen(request).read().decode())
 
   def maybe_refresh_token(self) -> None:
     remaining_time = self.token.expire_time - time.time() 
@@ -355,7 +356,7 @@ class ImageSync(object):
     media_items = {}
     for i in range(0, len(media_ids), MAX_IDS_PER_BATCH_GET):
       batch_ids = media_ids[i:i + MAX_IDS_PER_BATCH_GET]
-      params = urlencode([('mediaItemIds', media_id) for media_id in batch_ids])
+      params = urllib.parse.urlencode([('mediaItemIds', media_id) for media_id in batch_ids])
       response = self.api_request('/v1/mediaItems:batchGet?{}'.format(params))
       for media_item_result in response['mediaItemResults']:
         error = media_item_result.get('status')
