@@ -22,7 +22,6 @@ logger = logging.getLogger()
 TOKEN_FILE = '.token.json'
 LOCATIONS_FILE = '.file_locations.json'
 
-CLIENT_CONFIG_FILE = 'client_config.json'
 MAX_IDS_PER_BATCH_GET = 50
 
 BASE_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -143,15 +142,15 @@ def read_json_file(path: str) -> Optional[dict]:
   with open(path) as f:
     return json.loads(f.read())
 
-def read_client_config() -> ClientConfig:
-  client_config = read_json_file(CLIENT_CONFIG_FILE)
+def read_client_config(path: str) -> ClientConfig:
+  client_config = read_json_file(path)
   if not client_config:
-    raise Exception('{} file required'.config(CLIENT_CONFIG_FILE))
+    raise Exception('{} file required'.config(path))
   client_id = client_config.get('client_id')
   client_secret = client_config.get('client_secret')
   if not client_id or not client_secret:
     raise Exception('client_id and client_secret required within {}'.format(
-      CLIENT_CONFIG_FILE))
+      path))
   return ClientConfig(client_id=client_id, client_secret=client_secret)
 
 def confirm(question: str) -> bool:
@@ -402,6 +401,7 @@ class ImageSync(object):
 def main():
   parser = argparse.ArgumentParser(
       description='Syncs all google photos to a local directory.')
+  parser.add_argument('--client_config', '-c', type=str, required=True)
   parser.add_argument('--output_dir', '-o', type=str, required=True)
   parser.add_argument('--max_downloads', type=int, default=500)
   parser.add_argument('--max_images_to_sync', type=int, default=None)
@@ -413,7 +413,7 @@ def main():
   if args.debug:
     logger.setLevel(logging.DEBUG)
 
-  client_config = read_client_config()
+  client_config = read_client_config(args.client_config)
   token_file = os.path.join(args.output_dir, TOKEN_FILE)
   token = read_token(token_file)
   if not token:
