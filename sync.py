@@ -14,6 +14,7 @@ import queue
 import random
 import socketserver
 import string
+import sys
 import threading
 import time
 import urllib.parse
@@ -99,12 +100,17 @@ class DownloadThread(threading.Thread):
         try:
           urllib.request.urlretrieve(
               download.image.download_url(), download.location.absolute_path)
-          self.completed_download_queue.put(DownloadResult(download=download, success=True))
+          self.completed_download_queue.put(
+              DownloadResult(download=download, success=True))
         except:
-          logging.error('Error downloading %s', download.image.download_url(), exc_info=True)
+          logging.error(
+              'Error downloading %s',
+              download.image.download_url(),
+              exc_info=True)
           if os.path.isfile(download.location.absolute_path):
             os.remove(download.location.absolute_path)
-          self.completed_download_queue.put(DownloadResult(download=download, success=False))
+          self.completed_download_queue.put(
+              DownloadResult(download=download, success=False))
     except queue.Empty:
       #This is expected when downloading is done
       pass
@@ -256,7 +262,8 @@ class ImageSync(object):
     print('Requesting image list ', end='')
     while True:
       self.maybe_refresh_token()
-      response = self.api_request('/v1/mediaItems?{}'.format(urllib.parse.urlencode(params)))
+      response = self.api_request('/v1/mediaItems?{}'.format(
+        urllib.parse.urlencode(params)))
       print('.', end='', flush=True)
       for media_item_data in response['mediaItems']:
         media_item = parse_media_item(media_item_data)
@@ -330,8 +337,9 @@ class ImageSync(object):
       location = self.find_unused_file(image.filename, pending_locations)
       pending_locations.add(location.relative_path)
       downloads.append(Download(image=image, location=location))
-    self.download(downloads)
+    success = self.download(downloads)
     print('Done')
+    return success
 
   def download(self, downloads: List[Download]) -> None:
     image_count_to_download = len(downloads)
@@ -344,6 +352,7 @@ class ImageSync(object):
     for _ in range(self.download_threads):
       DownloadThread(pending_download_queue, completed_download_queue).start()
 
+    success = True
     while pending_download_count > 0:
       completed_downloads_count = (
           image_count_to_download - pending_download_count)
@@ -356,6 +365,7 @@ class ImageSync(object):
       self.image_locations[result.download.image.media_id] = (
           result.download.location.relative_path)
       print('.' if result.success else 'E', end='', flush=True)
+      success = success and result.success
       if pending_download_count % 20 == 0:
         self.write_image_locations()
       pending_download_count = pending_download_count - 1
@@ -363,13 +373,16 @@ class ImageSync(object):
     if image_count_to_download > 0:
       print()
     self.write_image_locations()
+    return success
 
   def get_media_items(self, media_ids: List[str]) -> Dict[str, str]:
     media_items = {}
-    print('Getting image lists ({}) '.format(math.ceil(len(media_ids) / MAX_IDS_PER_BATCH_GET)), end='')
+    print('Getting image lists ({}) '.format(
+      math.ceil(len(media_ids) / MAX_IDS_PER_BATCH_GET)), end='')
     for i in range(0, len(media_ids), MAX_IDS_PER_BATCH_GET):
       batch_ids = media_ids[i:i + MAX_IDS_PER_BATCH_GET]
-      params = urllib.parse.urlencode([('mediaItemIds', media_id) for media_id in batch_ids])
+      params = urllib.parse.urlencode(
+          [('mediaItemIds', media_id) for media_id in batch_ids])
       response = self.api_request('/v1/mediaItems:batchGet?{}'.format(params))
       print('.', end='', flush=True)
       for media_item_result in response['mediaItemResults']:
@@ -383,6 +396,7 @@ class ImageSync(object):
     return media_items
 
   def reconcile(self) -> None:
+    success = True
     _, _, all_files = next(os.walk(self.output_dir), (None, None, []))
     non_hidden_files = set([f for f in all_files if not f.startswith('.')])
     expected_files = set(self.image_locations.values())
@@ -395,7 +409,8 @@ class ImageSync(object):
         for file in files_to_delete:
           os.remove(os.path.join(self.output_dir, file))
     entries_to_download = [
-        (k, v) for k, v in self.image_locations.items() if v not in non_hidden_files]
+        (k, v) for k, v in self.image_locations.items()
+        if v not in non_hidden_files]
     if entries_to_download:
       relative_paths = [v for k, v in entries_to_download]
       print('About to download:\n  {}'.format('\n  '.join(relative_paths)))
@@ -409,8 +424,9 @@ class ImageSync(object):
                 relative_path=relative_path,
                 absolute_path=os.path.join(self.output_dir, relative_path))
             downloads.append(Download(image=media_item, location=location))
-        self.download(downloads)
+        success = self.download(downloads)
     print('Done')
+    return success
 
 def main():
   parser = argparse.ArgumentParser(
@@ -441,10 +457,13 @@ def main():
       client_config, token_file, token, locations_file, image_locations,
       args.output_dir, args.download_threads)
 
+  success = True
   if args.reconcile:
-    image_sync.reconcile()
+    success = image_sync.reconcile()
   else:
-    image_sync.sync(args.max_images_to_sync, args.max_downloads)
+    success = image_sync.sync(args.max_images_to_sync, args.max_downloads)
+  if not success:
+    sys.exit(1)
 
 if __name__ == "__main__":
   main()
