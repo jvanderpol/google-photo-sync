@@ -321,7 +321,7 @@ class ImageSync(object):
         return FileLocation(relative_path=relative, absolute_path=absolute)
       suffix = suffix + 1
 
-  def sync(self, max_images_to_sync: int, max_downloads: int):
+  def sync(self, max_images_to_sync: int, max_downloads: int) -> bool:
     images_to_download = [
         i for i in self.list_images(max_images_to_sync)
         if i.media_id not in self.image_locations]
@@ -395,7 +395,7 @@ class ImageSync(object):
             media_items[media_item.media_id] = media_item
     return media_items
 
-  def reconcile(self) -> None:
+  def reconcile(self) -> bool:
     success = True
     _, _, all_files = next(os.walk(self.output_dir), (None, None, []))
     non_hidden_files = set([f for f in all_files if not f.startswith('.')])
