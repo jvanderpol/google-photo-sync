@@ -33,7 +33,7 @@
 #   </dict>
 # </plist>
 
-echo `date`: $@ 1>&2
+echo `date`: $@ | tee /dev/stderr
 "$@"
 
 retcode=$?
