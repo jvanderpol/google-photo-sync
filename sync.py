@@ -72,6 +72,9 @@ def parse_media_item(media_item: Dict) -> Optional[MediaItem]:
       filename=media_item['filename'],
       base_url=media_item['baseUrl'])
 
+def normalized_path(path: str) -> str:
+  return path.lower()
+
 @dataclasses.dataclass
 class Download:
   image: MediaItem
@@ -261,7 +264,6 @@ class ImageSync(object):
     images_returned = 0
     print('Requesting image list ', end='')
     while True:
-      self.maybe_refresh_token()
       response = self.api_request('/v1/mediaItems?{}'.format(
         urllib.parse.urlencode(params)))
       print('.', end='', flush=True)
@@ -280,6 +282,7 @@ class ImageSync(object):
       params['pageToken'] = next_page_token
 
   def api_request(self, path: str):
+    self.maybe_refresh_token()
     url = BASE_PHOTOS_API_URL + path
     logging.debug('Making request to {}'.format(url))
     request = urllib.request.Request(
@@ -289,7 +292,7 @@ class ImageSync(object):
 
   def maybe_refresh_token(self) -> None:
     remaining_time = self.token.expire_time - time.time() 
-    if remaining_time < 0:
+    if remaining_time < 60:
       logging.debug('Refreshing token')
       new_token = make_auth_token_request(
           self.client_config,
@@ -304,7 +307,7 @@ class ImageSync(object):
       f.write(json.dumps(self.image_locations, indent=2))
 
   def find_unused_file(
-      self, preferred_name: str, pending_locations: Set[str]
+      self, preferred_name: str, normalized_used_locations: Set[str]
   ) -> FileLocation:
     suffix = 0
     while True:
@@ -316,8 +319,7 @@ class ImageSync(object):
         relative = preferred_name
       absolute = os.path.join(self.output_dir, relative)
       if (not os.path.isfile(absolute) and
-          relative not in self.image_locations.values() and
-          relative not in pending_locations):
+          normalized_path(relative) not in normalized_used_locations):
         return FileLocation(relative_path=relative, absolute_path=absolute)
       suffix = suffix + 1
 
@@ -331,11 +333,13 @@ class ImageSync(object):
           'Increase the limit or use --max_downloads=-1'.format(
             len(images_to_download), max_downloads))
 
-    pending_locations = set()
+    normalized_used_locations = set(
+        [normalized_path(f) for f in self.image_locations.values()])
     downloads = []
     for image in images_to_download:
-      location = self.find_unused_file(image.filename, pending_locations)
-      pending_locations.add(location.relative_path)
+      location = self.find_unused_file(
+          image.filename, normalized_used_locations)
+      normalized_used_locations.add(normalized_path(location.relative_path))
       downloads.append(Download(image=image, location=location))
     success = self.download(downloads)
     print('Done')
