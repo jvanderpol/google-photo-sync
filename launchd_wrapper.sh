@@ -23,13 +23,6 @@
 #     <string>/tmp/photosync.stderr</string>
 #     <key>StartInterval</key>
 #     <integer>3600</integer>
-#     <key>KeepAlive</key>
-#     <dict>
-#       <key>NetworkState</key>
-#       <true/>
-#       </dict>
-#       <key>TimeOut</key>
-#       <integer>300</integer>
 #   </dict>
 # </plist>
 
